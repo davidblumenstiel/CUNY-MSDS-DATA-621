@@ -14,6 +14,7 @@ library(naniar)
 library(caret)
 library(GGally)
 library(MASS)
+library(fastDummies)
 ```
 
 
@@ -88,12 +89,8 @@ Now we'll use the function to clean the data.  In addition, we'll also do a box-
 
 ```{r}
 #Clean all the data
-testing <- cleanup(testing, outlier_mult = 3)  
-training <- cleanup(training, outlier_mult = 3)
-
-#Guide for this bit found here https://www.r-bloggers.com/2016/01/how-to-detect-heteroscedasticity-and-rectify-it/
-boxcox_trans_mod <- BoxCoxTrans(training$TARGET_WINS)
-training$TARGET_WINS_transformed <- predict(boxcox_trans_mod, training$TARGET_WINS)
+testing <- cleanup(testing, outlier_mult = 5)    #Standard is 1.5, but this get's better results
+training <- cleanup(training, outlier_mult = 5)
 
 summary(training)
 ```
@@ -105,10 +102,10 @@ summary(training)
 names = colnames(training)
 for (i in 3:length(training)-1) {
   name = names[i]
-  plot(training$TARGET_WINS_transformed ~ training[,i], xlab = name, ylab = "TARGET_WINS_transformed")
-  l = lm(training$TARGET_WINS_transformed ~ training[,i])
+  plot(training$TARGET_WINS ~ training[,i], xlab = name, ylab = "TARGET_WINS_transformed")
+  l = lm(training$TARGET_WINS ~ training[,i])
   abline(l, col = "red")
-  text(min(training[,i]),130,paste("R^2 = ", round(summary(l)$r.squared,3),"  cor = ",round(cor(y = training$TARGET_WINS_transformed, x =  training[,i]),3)), adj = 0)
+  text(min(training[,i]),130,paste("R^2 = ", round(summary(l)$r.squared,3),"  cor = ",round(cor(y = training$TARGET_WINS, x =  training[,i]),3)), adj = 0)
 }
 
 
@@ -116,7 +113,7 @@ for (i in 3:length(training)-1) {
 
 ### Model 1
 
-This model performs the best of the two I've made.  It utilizes all variables except the pitching ones, which are pretty much co-linear with the batting ones.  This uses a stepwise method to narrow down the parameters, and checks all interactions terms 2 layers deep.  5 fold cv is used with 2 repeats.
+This model utilizes all variables except the pitching ones, which are pretty much co-linear with the batting ones.  This uses a stepwise method to narrow down the parameters, and checks all interactions terms 2 layers deep.  5 fold cv is used with 2 repeats.  A seperate validation set is held in reserve to gauge accuracy (stepwise regression is known for overfitting).
 
 ```{r}
 set.seed(1234567890) #So you see the same thing I do
@@ -124,41 +121,236 @@ set.seed(1234567890) #So you see the same thing I do
 #Set's up some K-fold validation and repetition
 tr <- trainControl(method = "repeatedcv", number = 5, repeats = 2)
 
+#Set's up validations set, which won't get touched during stepwise regression.  Gives us a better sense of performance
+split <- createDataPartition(training$TARGET_WINS, p = 0.8, list = FALSE)
+train <- training[split,]
+validation <- training[-split,]
+
 #Set's up the model
-model <- train(TARGET_WINS_transformed~ (TEAM_BATTING_H + TEAM_BATTING_2B + TEAM_BATTING_3B + TEAM_BATTING_HR + TEAM_BATTING_BB + TEAM_BATTING_SO + TEAM_BASERUN_SB + TEAM_BASERUN_CS + TEAM_FIELDING_E + TEAM_FIELDING_DP)^2, data = training, method = "lmStepAIC", trControl= tr)
+model <- train(TARGET_WINS~ (TEAM_BATTING_H + TEAM_BATTING_2B + TEAM_BATTING_3B + TEAM_BATTING_HR + TEAM_BATTING_BB + TEAM_BATTING_SO + TEAM_BASERUN_SB + TEAM_BASERUN_CS + TEAM_FIELDING_E + TEAM_FIELDING_DP)^2, data = train, method = "lmStepAIC", trControl= tr,trace = FALSE)  #Supress the trace or else this will eat your screen
 
 #Plots it out and gets stats  
-plot(model$finalModel)
-predictions <- predict(model, training)
-plot(predictions, training$TARGET_WINS)
 summary(model$finalModel)
+plot(model$finalModel)
+
 
 
 ```
-This one performs fairly well, with R^2 near 0.4.  Doing the box-cox transformaton improved the R^2 by about 0.03.  The tails on the QQ plot are a bit heavy, and scale, but residuals and leveage look good.  My biggest concern is slight heterocedasticity.  It also uses predictors which, by themselves, are not very predictive.
+
+Now let's see how it does on the validations set.
+```{r}
+predictions <- predict(model, validation)
+l <- lm(predictions~validation$TARGET_WINS)
+
+plot(predictions~validation$TARGET_WINS)
+text(10, 100, paste("R^2: ",round(summary(l)$r.squared,3)))
+abline(l$coefficients, col = 'red')
+```
+
+This model performs fairly well, with R^2 near 0.43 on the holdout set.   There seems to be a balancing act when it comes to outliers: a higher tolerance for keeping outliers leads to higher R^2 values, but more heteroscedascity.  As is now (with an outlier tolerance of $median \pm 5*IQR$, there's a slight heteroscedascity and heavy tails, but the model has a close fit.
+
+This model also uses some predictors which, by themselves, are not very predictive.  In addition, Stepwise regression is also known to cause problems, and can introduce biases which inflate the R^2.  However, the model performs well on the validation set.
+
+
 
 
 ### Model 2
-This model is similar to the last one, but narrows down the number of parameters considered to only those with a decent correlation to target wins. This one goes three layers deep into interaction terms, and repeats twice more.
 
+First, we prepair the new features
 ```{r}
-tr <- trainControl(method = "repeatedcv", number = 5, repeats = 2, verboseIter = TRUE)
+##correlation_table(train, target = "TARGET_WINS")
 
-model2 <- train(TARGET_WINS_transformed~ (TEAM_BATTING_H + TEAM_BATTING_2B + TEAM_BATTING_3B + TEAM_BATTING_HR + TEAM_BATTING_BB)^3, data = training, method = "lmStepAIC", trControl= tr)
+#true<-lm(TARGET_WINS ~ hr_era+hr_era_p, data = train)
 
-plot(model2$finalModel)
-predictions <- predict(model2, training)
-plot(predictions, training$TARGET_WINS)
-summary(model2$finalModel)
+yr <- data.frame(read_csv("https://raw.githubusercontent.com/agersowitz/DATA-621/main/year%20predict.csv"))
 
+
+train <-training
+
+
+train$X2B=(train$TEAM_BATTING_2B/162)
+train$X3B=(train$TEAM_BATTING_3B/162)
+train$BB=((train$TEAM_BATTING_BB/162)+(train$TEAM_PITCHING_BB/162))/2
+train$SO=((train$TEAM_BATTING_SO/162)+(train$TEAM_PITCHING_SO/162))/2
+
+year<-lm(Year ~ X2B+X3B+BB+SO, data = yr)
+
+#summary(year)
+#plot(year)
+
+predicted_year<- predict(year, newdata = train)
+
+train<-cbind(train,predicted_year)
+
+
+
+train$era = ifelse(train$predicted_year>= 1994,"Modern",
+                   ifelse(train$predicted_year> 1977 & train$predicted_year<1993, "FreeAgency",
+                   ifelse(train$predicted_year> 1961 & train$predicted_yea<1976, "Expansion",
+                   ifelse(train$predicted_year> 1942 & train$predicted_yea<1960, "Integration",
+                    ifelse(train$predicted_year> 1920 & train$predicted_yea<1941, "LiveBall",
+                          "DeadBall")))))
+
+train<-dummy_cols(train,select_columns=c("era"))
+
+#skim(train)
+
+
+train$H_era_m <- (train$TEAM_BATTING_H)*train$era_Modern
+train$H_era_fa <- (train$TEAM_BATTING_H)*train$era_FreeAgency
+train$H_era_e <- (train$TEAM_BATTING_H)*train$era_Expansion
+train$H_era_i <- (train$TEAM_BATTING_H)*train$era_Integration
+train$H_era_lb <- (train$TEAM_BATTING_H)*train$era_LiveBall
+train$H_era_db <- (train$TEAM_BATTING_H)*train$era_DeadBall
+
+train$H_era_m_p <- (train$TEAM_PITCHING_H)*train$era_Modern
+train$H_era_fa_p <- (train$TEAM_PITCHING_H)*train$era_FreeAgency
+train$H_era_e_p <- (train$TEAM_PITCHING_H)*train$era_Expansion
+train$H_era_i_p <- (train$TEAM_PITCHING_H)*train$era_Integration
+train$H_era_lb_p <- (train$TEAM_PITCHING_H)*train$era_LiveBall
+train$H_era_db_p <- (train$TEAM_PITCHING_H)*train$era_DeadBall
+
+train$bb_era_m <- (train$TEAM_BATTING_BB)*train$era_Modern
+train$bb_era_fa <- (train$TEAM_BATTING_BB)*train$era_FreeAgency
+train$bb_era_e <- (train$TEAM_BATTING_BB)*train$era_Expansion
+train$bb_era_i <- (train$TEAM_BATTING_BB)*train$era_Integration
+train$bb_era_lb <- (train$TEAM_BATTING_BB)*train$era_LiveBall
+train$bb_era_db <- (train$TEAM_BATTING_BB)*train$era_DeadBall
+
+train$bb_era_m_p <- (train$TEAM_PITCHING_BB)*train$era_Modern
+train$bb_era_fa_p <- (train$TEAM_PITCHING_BB)*train$era_FreeAgency
+train$bb_era_e_p <- (train$TEAM_PITCHING_BB)*train$era_Expansion
+train$bb_era_i_p <- (train$TEAM_PITCHING_BB)*train$era_Integration
+train$bb_era_lb_p <- (train$TEAM_PITCHING_BB)*train$era_LiveBall
+train$bb_era_db_p <- (train$TEAM_PITCHING_BB)*train$era_DeadBall
+
+train$hr_era_m <- (train$TEAM_BATTING_HR)*train$era_Modern
+train$hr_era_fa <- (train$TEAM_BATTING_HR)*train$era_FreeAgency
+train$hr_era_e <- (train$TEAM_BATTING_HR)*train$era_Expansion
+train$hr_era_i <- (train$TEAM_BATTING_HR)*train$era_Integration
+train$hr_era_lb <- (train$TEAM_BATTING_HR)*train$era_LiveBall
+train$hr_era_db <- (train$TEAM_BATTING_HR)*train$era_DeadBall
+
+train$hr_era_m_p <- (train$TEAM_PITCHING_HR)*train$era_Modern
+train$hr_era_fa_p <- (train$TEAM_PITCHING_HR)*train$era_FreeAgency
+train$hr_era_e_p <- (train$TEAM_PITCHING_HR)*train$era_Expansion
+train$hr_era_i_p <- (train$TEAM_PITCHING_HR)*train$era_Integration
+train$hr_era_lb_p <- (train$TEAM_PITCHING_HR)*train$era_LiveBall
+train$hr_era_db_p <- (train$TEAM_PITCHING_HR)*train$era_DeadBall
+
+train$so_era_m <- (train$TEAM_BATTING_SO)*train$era_Modern
+train$so_era_fa <- (train$TEAM_BATTING_SO)*train$era_FreeAgency
+train$so_era_e <- (train$TEAM_BATTING_SO)*train$era_Expansion
+train$so_era_i <- (train$TEAM_BATTING_SO)*train$era_Integration
+train$so_era_lb <- (train$TEAM_BATTING_SO)*train$era_LiveBall
+train$so_era_db <- (train$TEAM_BATTING_SO)*train$era_DeadBall
+
+train$so_era_m_p <- (train$TEAM_PITCHING_SO)*train$era_Modern
+train$so_era_fa_p <- (train$TEAM_PITCHING_SO)*train$era_FreeAgency
+train$so_era_e_p <- (train$TEAM_PITCHING_SO)*train$era_Expansion
+train$so_era_i_p <- (train$TEAM_PITCHING_SO)*train$era_Integration
+train$so_era_lb_p <- (train$TEAM_PITCHING_SO)*train$era_LiveBall
+train$so_era_db_p <- (train$TEAM_PITCHING_SO)*train$era_DeadBall
+
+train$x2b_era_m <- (train$TEAM_BATTING_2B)*train$era_Modern
+train$x2b_era_fa <- (train$TEAM_BATTING_2B)*train$era_FreeAgency
+train$x2b_era_e <- (train$TEAM_BATTING_2B)*train$era_Expansion
+train$x2b_era_i <- (train$TEAM_BATTING_2B)*train$era_Integration
+train$x2b_era_lb <- (train$TEAM_BATTING_2B)*train$era_LiveBall
+train$x2b_era_db <- (train$TEAM_BATTING_2B)*train$era_DeadBall
+
+train$x3b_era_m <- (train$TEAM_BATTING_3B)*train$era_Modern
+train$x3b_era_fa <- (train$TEAM_BATTING_3B)*train$era_FreeAgency
+train$x3b_era_e <- (train$TEAM_BATTING_3B)*train$era_Expansion
+train$x3b_era_i <- (train$TEAM_BATTING_3B)*train$era_Integration
+train$x3b_era_lb <- (train$TEAM_BATTING_3B)*train$era_LiveBall
+train$x3b_era_db <- (train$TEAM_BATTING_3B)*train$era_DeadBall
+
+train$sb_era_m <- (train$TEAM_BASERUN_SB)*train$era_Modern
+train$sb_era_fa <- (train$TEAM_BASERUN_SB)*train$era_FreeAgency
+train$sb_era_e <- (train$TEAM_BASERUN_SB)*train$era_Expansion
+train$sb_era_i <- (train$TEAM_BASERUN_SB)*train$era_Integration
+train$sb_era_lb <- (train$TEAM_BASERUN_SB)*train$era_LiveBall
+train$sb_era_db <- (train$TEAM_BASERUN_SB)*train$era_DeadBall
+
+train$cs_era_m <- (train$TEAM_BASERUN_CS)*train$era_Modern
+train$cs_era_fa <- (train$TEAM_BASERUN_CS)*train$era_FreeAgency
+train$cs_era_e <- (train$TEAM_BASERUN_CS)*train$era_Expansion
+train$cs_era_i <- (train$TEAM_BASERUN_CS)*train$era_Integration
+train$cs_era_lb <- (train$TEAM_BASERUN_CS)*train$era_LiveBall
+train$cs_era_db <- (train$TEAM_BASERUN_CS)*train$era_DeadBall
+
+
+train$e_era_m <- (train$TEAM_FIELDING_E)*train$era_Modern
+train$e_era_fa <- (train$TEAM_FIELDING_E)*train$era_FreeAgency
+train$e_era_e <- (train$TEAM_FIELDING_E)*train$era_Expansion
+train$e_era_i <- (train$TEAM_FIELDING_E)*train$era_Integration
+train$e_era_lb <- (train$TEAM_FIELDING_E)*train$era_LiveBall
+train$e_era_db <- (train$TEAM_FIELDING_E)*train$era_DeadBall
+
+
+train$dp_era_m <- (train$TEAM_FIELDING_DP)*train$era_Modern
+train$dp_era_fa <- (train$TEAM_FIELDING_DP)*train$era_FreeAgency
+train$dp_era_e <- (train$TEAM_FIELDING_DP)*train$era_Expansion
+train$dp_era_i <- (train$TEAM_FIELDING_DP)*train$era_Integration
+train$dp_era_lb <- (train$TEAM_FIELDING_DP)*train$era_LiveBall
+train$dp_era_db <- (train$TEAM_FIELDING_DP)*train$era_DeadBall
 ```
 
 
+There's alot of collinearity among the new variables.  Below we drop collinear terms.
+
+```{r fig.height= 30, fig.width=30}
+train$era <- NULL  #Gets rid of the only non numeric value
+dropem <- findCorrelation(cor(train), cutoff = 0.7) #Finds collinear variables
+train <- train[,-dropem] #Drops collinear variables
+corrplot(cor(train))
+```
+
+Now to actually make/download the model.  This will look amongst both the origional variables and new ones, excluding colinear terms.  It will look to interaction terms deep, and do stepwise selection to pick narrow down the amount of coefficients used in the final model.  The stepwise selection process takes quite a while, so the chunk below is going to try to download the pre-trained model instead of training it again.
 
 ```{r}
-predictions <- predict(model, training)
-plot(predictions, training$TARGET_WINS)
+set.seed(1234567890) #So you see the same thing I do
+
+#Splits off a validation set for judging performance 
+split <- createDataPartition(train$TARGET_WINS, p = 0.8, list = FALSE)
+train_set <- train[split,]
+validation_set <- train[-split,]
+
+#To save you time.  Internet connection highly advised.
+#https://stackoverflow.com/questions/56602149/directly-loading-rdata-from-github
+githubURL <- "https://github.com/davidblumenstiel/CUNY-MSDS-DATA-621/raw/main/Assignment1/era_model_stepped.rds"
+try(era_model_stepped <- readRDS(url(githubURL)))
+
+if (exists("era_model_stepped") == FALSE) {
+  
+  #Finds a linear model with two layers of interaction terms.  Has an R^2 of about 0.48, but way too many terms
+  era_model <- lm(TARGET_WINS ~ (TEAM_BATTING_H + TEAM_BASERUN_SB + TEAM_BASERUN_CS + TEAM_PITCHING_H + TEAM_PITCHING_HR + TEAM_PITCHING_BB + TEAM_PITCHING_SO + TEAM_FIELDING_E + TEAM_FIELDING_DP + X2B + X3B + hr_era_i + hr_era_lb + hr_era_db + sb_era_m + sb_era_m + sb_era_fa + sb_era_e + sb_era_i + sb_era_lb + sb_era_db)^2
+                  , data = train_set)
+  
+  #Stepwise regression.  Only going backwards because this takes a lot of computing
+  era_model_stepped <- stepAIC(era_model, direction = "backwards") 
+  
+  #Will save the model to working directory
+  saveRDS(era_model_stepped, "era_model_stepped.rds", compress = FALSE)
+}
+
+#Make predictions on validation set
+predictions <- predict(era_model_stepped, validation_set)
+l <- lm(predictions~validation_set$TARGET_WINS)
+
+summary(era_model_stepped)
+plot(predictions~validation_set$TARGET_WINS)
+text(10, 100, paste("R^2: ",round(summary(l)$r.squared,3)))
+abline(l$coefficients, col = 'red')
+plot(era_model_stepped)
+
+
 ```
+
+While this model appears to have a somewhat high R-squared (0.48), in reality, it's predictive value is much lower because it overfits.  When we look at how the model performs on the validaton set, we end up with an R^2 of only 0.38; a good example of how having so many terms can lead to overifitting.  The residuals seem okay, although there is perhaps somthing a slight curve to them.  The QQ plot reveals heavy tails, although most deviation is among a few outliers.  There's one leverage point with a Cook's distance score over 0.5.  Overall, this model could be used for decent predictions (and seems valid), but could probably have it's coefficients narrowed down further.
+
+
 
 
 
