@@ -324,13 +324,13 @@ The results are comprable to the ones attained with the in-house functions.
 
 
 ### 13: Investigate the pROC package. Use it to generate an ROC curve for the data set. How do the results compare with your own functions?
-``}
+```{r}
 library(pROC)
 
 proc <- roc(df$class, df$scored.probability) 
 
 proc
-`lot(proc)
+```
 
 
 
