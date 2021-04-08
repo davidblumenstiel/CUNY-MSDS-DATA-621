@@ -1,0 +1,257 @@
+---
+title: "Assignment_3"
+author: "David Blumenstiel"
+date: "4/6/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+```
+
+
+
+
+```{r}
+df <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DATA-621/main/Assignment_3/crime-training-data_modified.csv")
+
+
+head(df)
+
+```
+```{r}
+#Basic summary
+
+summary(df)
+```
+
+No missing data, two categorical variables that need to be factorized, no huge outliers.  Target is fairly balanced between two classes (mean is around 0.5).  
+
+```{r}
+#Basic data prep
+df$target <- as.factor(df$target)
+df$chas <- as.factor(df$chas)
+
+summary(df)
+```
+
+```{r}
+#train/validation split
+#80/20 split
+
+set.seed(1234567890)
+splitdex<- createDataPartition(df$target, p = 0.8, list = FALSE)
+
+train <- df[splitdex,]
+validation <- df[-splitdex,]
+```
+
+
+### Base model
+
+```{r}
+#Benchmark model; all variables
+#Took inspiration from https://www.r-bloggers.com/2020/05/binary-logistic-regression-with-r/
+basemodel <- glm(target~., data = train, family = "binomial")
+
+summary(basemodel)
+
+make.predictions <- function(model, test) {
+  
+    
+  test_pred_probs = predict(model, test, type = "response")
+  
+  test$predict_prob = test_pred_probs
+  
+  test$predicted =  as.factor(ifelse(test_pred_probs >= 0.5, 1, 0)) #Took most of this line from: https://www.r-bloggers.com/2020/05/binary-logistic-regression-with-r/
+  
+  return(test[,c("predict_prob","predicted")])
+  
+}
+
+predictions <- make.predictions(basemodel, validation)
+
+
+```
+
+Has some variables that arent too predictive
+
+```{r}
+library(pROC)
+confusionMatrix(predictions$predicted, validation$target, positive = '1')
+
+proc = roc(validation$target, predictions$predict_prob)
+
+plot(proc)
+print(proc$auc)
+```
+
+88% accurate, highly significant, and auc = 0.966.  Pretty accurate.
+
+
+###  Glmnet
+
+Glmnet is an interesting package that allows us to fit various penalized regression models (including logistic regression), using lasso or ridge regression, or a combination of the two (elastic-net).  
+
+```{r}
+library(glmnet)  #Was a helpful guide: https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html
+
+#There are random elements to this, but I'm not sure where (relaxed fit?)
+set.seed(1234567890)
+
+
+#Data prep.  Needs to be in matrix format
+#Took code from here: https://stackoverflow.com/questions/35437411/error-in-predict-glmnet-function-not-yet-implemented-method
+trainx = model.matrix(~.-target,data=train)     
+newx = model.matrix(~.-target,data=validation)
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+#lamba values are constants that define coefficient shrinkage.  
+glmnetmodel <- cv.glmnet(x = trainx,   #Predictor variables
+                      y = train[,names(train) == "target"],   #Responce variable
+                      family = "binomial", #Has it do logistic regression
+                      nfolds = 10, #10 fold cv
+                      type.measure = "class",  #uses missclassification error as loss
+                      gamma = seq(0,1,0.1),  #Values to use for relaxed fit
+                      relax = TRUE,#Mixes relaxed fit with regluarized fit
+                      alpha = 1) #Basically a choice betwen lasso, ridge, or elasticnet regression.  Alpha = 1 is lasso.
+
+
+
+#Predicts the probability that the target variable is 1
+predictions <- predict(glmnetmodel, newx = newx, type = "response", s="lambda.min") #setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model)
+
+           
+
+
+```
+
+
+Now let's evaluate it.
+
+```{r}
+confusionMatrix(as.factor(ifelse(predictions >= 0.5, 1, 0)), validation$target, positive = '1')
+
+proc = roc(validation$target, predictions)
+
+plot(proc)
+print(proc$auc)
+
+```
+
+90% accuracy, highly significant, and auc = 0.9664.  This model does a slightly  better on the validation set than the base model.  However, the validation set is very small, so this might not be the definitively better choice. 
+
+
+### Making predictions on the testing data
+
+Well use the glmnet model for this.  However, we'll retrain it using the full training set.  We won't have as good an estimate of how accurate it is, but this training dataset is kinda small and it would be nice to use it all.
+```{r}
+test = read.csv("https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DATA-621/main/Assignment_3/crime-evaluation-data_modified.csv")
+
+#There are random elements to this, but I'm not sure where (relaxed fit?)
+set.seed(1234567890)
+
+
+#Data prep.  Needs to be in matrix format
+#Took code from here: https://stackoverflow.com/questions/35437411/error-in-predict-glmnet-function-not-yet-implemented-method
+trainx = model.matrix(~.-target,data=df)     
+newx = model.matrix(~.,data=test)
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+glmnetmodel <- cv.glmnet(x = trainx,   #Predictor variables
+                      y = df[,names(df) == "target"],   #Responce variable
+                      family = "binomial", #Has it do logistic regression
+                      nfolds = 10, #10 fold cv
+                      type.measure = "class",  #uses missclassification error as loss
+                      gamma = seq(0,1,0.1),  #Values to use for relaxed fit
+                      relax = TRUE, #Mixes relaxed fit with regluarized fit
+                      alpha = 1) #Basically a choice betwen lasso, ridge, or elasticnet regression.  Alpha = 1 is lasso.
+
+
+
+#Predicts the probability that the target variable is 1
+predicted_probability <- predict(glmnetmodel, newx = newx, type = "response", s="lambda.min") 
+predicted_class <- predict(glmnetmodel, newx = newx, type = "class", s="lambda.min") 
+
+predictions <- data.frame(predicted_class,predicted_probability)
+colnames(predictions) <- c("predicted_class","predicted_probability")
+
+write.csv(predictions, file = "predictions.csv")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
