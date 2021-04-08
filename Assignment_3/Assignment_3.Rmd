@@ -11,7 +11,7 @@ library(caret)
 ```
 
 
-
+### Import the training data
 
 ```{r}
 df <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DATA-621/main/Assignment_3/crime-training-data_modified.csv")
@@ -20,6 +20,7 @@ df <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DAT
 head(df)
 
 ```
+
 ```{r}
 #Basic summary
 
@@ -28,6 +29,11 @@ summary(df)
 
 No missing data, two categorical variables that need to be factorized, no huge outliers.  Target is fairly balanced between two classes (mean is around 0.5).  
 
+
+### Data prep
+
+Won't do any major transformation, just need to change a couple datatypes
+
 ```{r}
 #Basic data prep
 df$target <- as.factor(df$target)
@@ -35,6 +41,8 @@ df$chas <- as.factor(df$chas)
 
 summary(df)
 ```
+
+We'll also do a train/test split so we can better evaluate the models
 
 ```{r}
 #train/validation split
@@ -49,6 +57,8 @@ validation <- df[-splitdex,]
 
 
 ### Base model
+
+This is going to be a simple model using all the variables available.  Makes a good benchmark.
 
 ```{r}
 #Benchmark model; all variables
@@ -75,7 +85,7 @@ predictions <- make.predictions(basemodel, validation)
 
 ```
 
-Has some variables that arent too predictive
+Has some variables that arent too predictive.  Let's evaluate further using a confusion matrix and ROC-AUC.
 
 ```{r}
 library(pROC)
@@ -87,12 +97,12 @@ plot(proc)
 print(proc$auc)
 ```
 
-88% accurate, highly significant, and auc = 0.966.  Pretty accurate.
+88% accurate, highly significant, and auc = 0.966.  This model works fairly well.
 
 
-###  Glmnet
+###  Lasso regression via glmnet
 
-Glmnet is an interesting package that allows us to fit various penalized regression models (including logistic regression), using lasso or ridge regression, or a combination of the two (elastic-net).  
+Glmnet is an interesting package that allows us to fit various penalized regression models (including logistic regression), using lasso or ridge regression, or a combination of the two (elastic-net).  We'll fit a lasso model (appears to work best after testing) to the data and see how it compares to the base model.
 
 ```{r}
 library(glmnet)  #Was a helpful guide: https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html
@@ -120,10 +130,11 @@ glmnetmodel <- cv.glmnet(x = trainx,   #Predictor variables
 
 
 #Predicts the probability that the target variable is 1
-predictions <- predict(glmnetmodel, newx = newx, type = "response", s="lambda.min") #setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model)
+predictions <- predict(glmnetmodel, newx = newx, type = "response", s=glmnetmodel$lambda.min) #setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model)
 
-           
 
+#Print's the coefficients the model uses
+print(coef.glmnet(glmnetmodel, s = glmnetmodel$lambda.min))
 
 ```
 
