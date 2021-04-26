@@ -1,0 +1,315 @@
+---
+title: "Assignment 4"
+author: "David Blumenstiel"
+date: "4/19/2021"
+output: html_document
+---
+
+
+```{r}
+library(tidyr)
+library(dplyr)
+library(caret)
+```
+
+
+```{r}
+#Data import
+raw <- read.csv("https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DATA-621/main/Assignment_4/insurance_training_data.csv", na.strings=c(""," ")) #Some of the missing data is written as blank instead of NA.  na.strings takes care of that
+
+summary(raw)
+
+head(raw)
+
+
+```
+
+Some missing data, some factors that should be numeric and vice versa.  Some of the data that should be numeric also contains dollar-signs and commas, which need to be removed prior to conversion to numeric.  We'll make a function to handle this.
+Another thing of note is that the responce variable TARGET_FLAG is unblanced.  only about 26% of the data represents crash claims.
+
+
+
+```{r}
+fetch_and_prep <- function(url) { #Will take a url and return the prepaired dataset
+  
+  #Some of the missing data is written as blank instead of NA.  na.strings takes care of that
+  df = read.csv(url, na.strings=c(""," "))
+  
+  #Scrap the index variable
+  df$INDEX <- NULL
+  
+  #Change to factor where appropriate
+  df[c("KIDSDRIV","HOMEKIDS","CLM_FREQ")] = lapply(df[c("KIDSDRIV","HOMEKIDS","CLM_FREQ")],factor)
+  
+  #Change to numeric where appropriate by first converting to characters, then removing '$' and ',', and then converting to numeric
+  df[c("INCOME","HOME_VAL","BLUEBOOK","OLDCLAIM")] = lapply(df[c("INCOME","HOME_VAL","BLUEBOOK","OLDCLAIM")], function(x) as.numeric(gsub('[,]','',gsub('[$]','',as.character(x)))))
+  
+  #############
+  #NA Imputation
+  
+  #Definitely up for debate as to how to handle missing data here.  Here's one take:
+  #Could also definitely use regression to impute alot of this (would probably be the better option), but this is less complex
+  
+  #Income: will set to median of job type.  If job is also NA, it assumes no job and income is 0
+  levels(df$JOB) = c(levels(df$JOB),"Unemployed","Unlisted") #adds some more job options
+  incomes = aggregate(INCOME~JOB, df, median)
+  i = 0
+  for(val in df$INCOME){
+    i = i+1
+    if(is.na(val)) {
+      if(is.na(df[i,"JOB"])) {
+        df[i,"INCOME"] = 0
+        df[i,"JOB"] = 'Unemployed' #Will also change job type to unemployed if no income or job listed
+      }
+      else{
+        df[i,"INCOME"] = incomes$INCOME[incomes$JOB == df[i,"JOB"]]
+      }
+    }
+  }
+  
+  #Job type: if job is NA but income is 0<, then it's likely they are employed; set job to 'unlisted'
+  df$JOB[is.na(df$JOB)] = "Unlisted"
+  
+  #Age: Set's it to median.  Not many NA's here
+  df$AGE[is.na(df$AGE)] = median(df$AGE, na.rm = TRUE)
+  
+  #Years on job: Set to median of that type of job
+  yearsonjob = aggregate(YOJ~JOB, df, median)
+  i = 0
+  for(val in df$YOJ){
+    i = i+1
+    if(is.na(val)) {
+      df[i,"YOJ"] = yearsonjob$YOJ[yearsonjob$JOB == df[i,"JOB"]]
+    }
+  }
+  
+  #Home value: Will assume NA means 0 home value (does not own home).  This one is up for debate
+  df$HOME_VAL[is.na(df$HOME_VAL)] = 0
+  
+  #Car Age.  Will set it to the median age of that type of car.  Linear regression using bluebook and cartype would be better
+  carages = aggregate(CAR_AGE~CAR_TYPE, df, median)
+  i = 0
+  for(val in df$CAR_AGE){
+    i = i+1
+    if(is.na(val)) {
+      df[i,"CAR_AGE"] = carages$CAR_AGE[carages$CAR_TYPE == df[i,"CAR_TYPE"]]
+    }
+    if(df[i,"CAR_AGE"] < 0) { #Someone set their car age to -3 in the training set
+      df[i,"CAR_AGE"] = 0
+    }
+    
+  }
+  
+  return(df)
+}
+
+
+
+url <- "https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DATA-621/main/Assignment_4/insurance_training_data.csv"
+#url <- "https://raw.githubusercontent.com/davidblumenstiel/CUNY-MSDS-DATA-621/main/Assignment_4/insurance-evaluation-data.csv"
+
+df <- fetch_and_prep(url)
+
+summary(df)
+
+
+```
+
+
+Start off with a base model for predicting whether or not there was a crash
+
+```{r}
+#Train test split
+set.seed(1234567890)
+splitdex<- createDataPartition(df$TARGET_FLAG, p = 0.8, list = FALSE)
+train <- df[splitdex,]
+validation <- df[-splitdex,]
+
+
+
+model <- glm(TARGET_FLAG~.-TARGET_AMT, data = train, family = "binomial")
+
+summary(model)
+
+
+```
+
+
+
+```{r}
+make.predictions <- function(model, test, threshold = 0.5) {
+  
+    
+  test_pred_probs = predict(model, test, type = "response")
+  
+  test$predict_prob = test_pred_probs
+  
+  test$predicted =  as.factor(ifelse(test_pred_probs >= threshold, 1, 0)) #Took most of this line from: https://www.r-bloggers.com/2020/05/binary-logistic-regression-with-r/
+  
+  return(test[,c("predict_prob","predicted")])
+  
+}
+predictions <- make.predictions(model, validation, threshold = 0.50)
+
+
+
+library(pROC)
+confusionMatrix(predictions$predicted, as.factor(validation$TARGET_FLAG), positive = '1')
+proc = roc(as.factor(validation$TARGET_FLAG), predictions$predict_prob)
+plot(proc)
+print(proc$auc)
+```
+
+This model has a decent accuracy, but isn't terribly useful.  If you recall, the dataset has about 74% cases of no crash; this only does marginally better than predicting no crash for each instance.  There are also alot of variables that aren't very predictive.  
+
+Let's try a LASSO model.  LASSO will rid us of some of the coefficients and hopefully help us put together a better model.
+
+```{r}
+#I'm copying alot of this from the last assignment
+
+library(glmnet)  #Was a helpful guide: https://web.stanford.edu/~hastie/glmnet/glmnet_alpha.html
+#There are random elements to this, but I'm not sure where (relaxed fit?)
+set.seed(1234567890)
+
+
+#Data prep.  Needs to be in matrix format
+#Took code from here: https://stackoverflow.com/questions/35437411/error-in-predict-glmnet-function-not-yet-implemented-method
+train_X <- model.matrix(~.-TARGET_FLAG -TARGET_AMT,data=train)  
+train_Y <- train$TARGET_FLAG
+
+val_X = model.matrix(~.-TARGET_FLAG -TARGET_AMT,data=validation)
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+#lamba values are constants that define coefficient shrinkage.  
+LASSO_crash_model <- cv.glmnet(x = train_X,   #Predictor variables
+                      y = train_Y,
+                      family = "binomial", #Has it do logistic regression
+                      nfolds = 20, #k fold cv
+                      type.measure = "class",  #uses missclassification error as loss
+                      alpha = 1) #Alpha = 1 is lasso.
+#Predicts the probability that the target variable is 1
+predictions <- predict(LASSO_crash_model, newx = val_X, type = "response", s=LASSO_crash_model$lambda.min) #setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model)
+#Print's the coefficients the model uses
+print(coef.glmnet(LASSO_crash_model, s = LASSO_crash_model$lambda.min))
+```
+
+
+
+
+```{r}
+confusionMatrix(as.factor(ifelse(predictions >= 0.5, 1, 0)), as.factor(validation$TARGET_FLAG), positive = '1')
+proc = roc(validation$TARGET_FLAG, predictions)
+plot(proc)
+print(proc$auc)
+
+
+```
+
+Seems like it's able to get rid of a few without predictors negatively impacting the accuracy or AUC much; seems like red cars are in the clear (lucky us).  That said, it's not really any more predictive than the base model, and is only about an additional 5% better than just guessing no crash for all cases.  
+
+
+### Payout
+
+Now we need to predict how much those who were predicted to crash actually get. 
+
+There are two different ways to go about selecting the data we want to use to train this: use data from all cases where there was a crash, or only use data where we predicted a crash.  Using all cases of crashes might be better at predicting the payout from crashes for the population, but using only predicted cases might be a more practical fit.  Let's try it with all cases, using a basic mutliple linear regression model, and LASSO again to try to get the number of predictors down.
+
+Below is a basic multiple regression model
+```{r}
+#Select only instances where a crash occured
+all_crash <- subset(df, TARGET_FLAG == 1)
+
+fit <- lm(TARGET_AMT~.-TARGET_FLAG, all_crash)
+summary(fit)
+plot(fit)
+
+```
+
+Yeah, pretty abyssmal.  This probably does not meet the assumptions of linear regression either.  First problem, the residuals are have a significant right-skew.  The responce variable also has a right skew; let's fix that and see if it helps.
+
+```{r}
+
+fit <- lm(log(all_crash$TARGET_AMT)~.-TARGET_FLAG, all_crash)
+summary(fit)
+plot(fit)
+
+
+```
+
+The residuals look much better after a log transformation, but the model is still only weekly predictive and insignificant.  Let's try using LASSO to reduce the number of coefficients (it seems like only one or a handful are useful) and see if it comes up with a better model.
+
+
+```{r}
+set.seed(0987654321)
+
+
+
+#Train test split
+splitdex <- createDataPartition(all_crash$TARGET_AMT, p = 0.8, list = FALSE)
+crash_train <- all_crash[splitdex,]
+crash_validation <- all_crash[-splitdex,]
+
+
+#Data prep.  Needs to be in matrix format
+#Took code from here: https://stackoverflow.com/questions/35437411/error-in-predict-glmnet-function-not-yet-implemented-method
+crash_train_X <- model.matrix(~.-TARGET_FLAG -TARGET_AMT,data=crash_train)  
+
+#Needs a log transformation
+crash_train_Y <- log(crash_train$TARGET_AMT)
+
+crash_val_X = model.matrix(~.-TARGET_FLAG -TARGET_AMT,data=crash_validation)
+
+#Makes a series of crossvalidated glmnet models for 100 lambda values (default)
+#lamba values are constants that define coefficient shrinkage.  
+LASSO_payout_model <- cv.glmnet(x = crash_train_X,   #Predictor variables
+                      y = crash_train_Y,
+                      nfolds = 10, #k fold cv
+                      type.measure = "mse",  #uses mean squared error as loss
+                      alpha = 1) #Alpha = 1 is lasso.
+
+
+predictions <- exp(predict(LASSO_payout_model, newx = crash_val_X, s=LASSO_payout_model$lambda.min)) #setting lambda.min uses the lambda value with the minimum mean cv error (picks the best model).  also corrects for the log transformation
+
+#Print's the coefficients the model uses
+print(coef.glmnet(LASSO_payout_model, s = LASSO_payout_model$lambda.min))
+```
+
+
+```{r}
+
+plot(predictions~crash_validation$TARGET_AMT)
+
+fit <- lm(predictions~crash_validation$TARGET_AMT)
+
+summary(fit)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
